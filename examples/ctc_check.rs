@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
         }).collect::<Vec<_>>()
     };
     println!("T={} C={} targets={} blank={}", t, c, targets.len(), blank);
-    let (paths, scores) = ctc_forced_aligner_rs::ctc::forced_align(&em, t, c, &targets, blank)?;
+    let (paths, _scores) = ctc_forced_aligner_rs::ctc::forced_align(&em, t, c, &targets, blank)?;
     // save
     let pb: Vec<u8> = paths.iter().flat_map(|p| (*p as u32).to_le_bytes()).collect();
     std::fs::write(r"D:\ctc-forced-aligner\ctc-aligner-rs\tmp\rust_path_from_py_em.bin", pb)?;

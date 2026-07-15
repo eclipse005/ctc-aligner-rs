@@ -25,7 +25,6 @@ pub struct CudaKernels {
     pub add_inplace: CudaFunction,
     pub add_bias_inplace: CudaFunction,
     pub bias_residual: CudaFunction,
-    pub softmax_last_dim: CudaFunction,
     pub softmax_inplace: CudaFunction,
     pub merge_heads: CudaFunction,
     pub split_qkv_to_heads: CudaFunction,
@@ -64,7 +63,6 @@ impl CudaKernels {
             add_inplace: load("add_inplace_f32")?,
             add_bias_inplace: load("add_bias_inplace_f32")?,
             bias_residual: load("bias_residual_f32")?,
-            softmax_last_dim: load("softmax_last_dim_f32")?,
             softmax_inplace: load("softmax_inplace_last_dim_f32")?,
             merge_heads: load("merge_heads_f32")?,
             split_qkv_to_heads: load("split_qkv_to_heads_f32")?,
@@ -82,7 +80,8 @@ impl CudaKernels {
 // ─── CudaState ───────────────────────────────────────────────────────────────
 
 pub struct CudaState {
-    pub ctx: Arc<CudaContext>,
+    /// Keep the CUDA context alive for the lifetime of stream / kernels / slices.
+    _ctx: Arc<CudaContext>,
     pub stream: Arc<CudaStream>,
     pub blas: CudaBlas,
     pub k: CudaKernels,
@@ -119,7 +118,7 @@ impl CudaState {
         let k = CudaKernels::load_all(ctx).context("CudaKernels::load_all")?;
         log::info!("CUDA device {ordinal} ready (cuBLAS SGEMM + prebuilt PTX f32)");
         Ok(Self {
-            ctx: ctx.clone(),
+            _ctx: ctx.clone(),
             stream,
             blas,
             k,
@@ -305,27 +304,6 @@ impl CudaState {
             .arg(&n_i)
             .arg(&cols_i);
         unsafe { bb.launch(cfg) }.map_err(|e| anyhow!("bias_residual: {e:?}"))?;
-        Ok(())
-    }
-
-    fn softmax_into(
-        &self,
-        out: &mut CudaSlice<f32>,
-        x: &CudaSlice<f32>,
-        rows: usize,
-        dim: usize,
-    ) -> Result<()> {
-        let block = 256u32.min(dim as u32).max(32);
-        let cfg = LaunchConfig {
-            grid_dim: (rows as u32, 1, 1),
-            block_dim: (block, 1, 1),
-            shared_mem_bytes: block * 4,
-        };
-        let rows_i = rows as i32;
-        let dim_i = dim as i32;
-        let mut bb = self.stream.launch_builder(&self.k.softmax_last_dim);
-        bb.arg(out).arg(x).arg(&rows_i).arg(&dim_i);
-        unsafe { bb.launch(cfg) }.map_err(|e| anyhow!("softmax: {e:?}"))?;
         Ok(())
     }
 
@@ -742,8 +720,8 @@ struct GpuScratch {
     q: CudaSlice<f32>,
     k: CudaSlice<f32>,
     v: CudaSlice<f32>,
+    /// Attention scores / weights (softmax in-place; no separate attn buffer).
     scores: CudaSlice<f32>,
-    attn: CudaSlice<f32>,
     ctx_pack: CudaSlice<f32>,
     ctx: CudaSlice<f32>,
     o_gemm: CudaSlice<f32>,
@@ -798,7 +776,6 @@ impl GpuScratch {
             k: s.alloc_uninit_f32(b_alloc * nh * hs)?,
             v: s.alloc_uninit_f32(b_alloc * nh * hs)?,
             scores: s.alloc_uninit_f32(b_alloc * nh * t * t)?,
-            attn: s.alloc_uninit_f32(b_alloc * nh * t * t)?,
             ctx_pack: s.alloc_uninit_f32(b_alloc * nh * hs)?,
             ctx: s.alloc_uninit_f32(rows * h)?,
             o_gemm: s.alloc_uninit_f32(rows * h)?,

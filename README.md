@@ -203,8 +203,7 @@ RTFx（P104-100 sm_61，load-once，约）：Rust CUDA f32 **~46×**（3m）/ **
 
 - **CPU 引擎**：冻结，与 torch CPU 帧级对齐  
 - **CUDA 引擎**：f32 全路径端到端；帧级对齐  
-- 不绑 MKL / `target-cpu=native`  
-- 更多规划见 `ROADMAP.md`
+- 不绑 MKL / `target-cpu=native`
 
 ---
 
