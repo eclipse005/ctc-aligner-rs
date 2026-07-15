@@ -85,6 +85,18 @@ pub struct Aligner {
     vocab: std::collections::HashMap<String, usize>,
     blank_id: usize,
     backend_tag: String,
+    /// Cache last decoded waveform (same path → skip re-decode / ffmpeg).
+    audio_cache: std::sync::Mutex<Option<(PathBuf, std::sync::Arc<Vec<f32>>)>>,
+    /// Cache last text preprocess (same path + options → skip uroman).
+    text_cache: std::sync::Mutex<
+        Option<(
+            PathBuf,
+            String, // language|split|star|romanize key
+            Vec<String>,
+            Vec<String>,
+            Vec<usize>,
+        )>,
+    >,
 }
 
 pub fn load_model(model_dir: impl AsRef<Path>, opts: ModelOptions) -> Result<Aligner> {
@@ -124,12 +136,35 @@ pub fn load_model(model_dir: impl AsRef<Path>, opts: ModelOptions) -> Result<Ali
         vocab,
         blank_id,
         backend_tag,
+        audio_cache: std::sync::Mutex::new(None),
+        text_cache: std::sync::Mutex::new(None),
     })
 }
 
 impl Aligner {
     pub fn align(&self, req: AlignRequest) -> Result<ForcedAlignResult> {
-        let waveform = load_wav_mono_f32(&req.audio_path)?;
+        let profile = std::env::var("CTC_PROFILE").ok().as_deref() == Some("1");
+        let t_all = std::time::Instant::now();
+
+        let t0 = std::time::Instant::now();
+        let waveform = {
+            let mut cache = self.audio_cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((p, w)) = cache.as_ref() {
+                if p == &req.audio_path {
+                    std::sync::Arc::clone(w)
+                } else {
+                    let w = std::sync::Arc::new(load_wav_mono_f32(&req.audio_path)?);
+                    *cache = Some((req.audio_path.clone(), std::sync::Arc::clone(&w)));
+                    w
+                }
+            } else {
+                let w = std::sync::Arc::new(load_wav_mono_f32(&req.audio_path)?);
+                *cache = Some((req.audio_path.clone(), std::sync::Arc::clone(&w)));
+                w
+            }
+        };
+        let t_audio = t0.elapsed();
+
         let raw_text = std::fs::read_to_string(&req.text_path)
             .with_context(|| format!("read text {}", req.text_path.display()))?;
         let raw_text = raw_text
@@ -149,18 +184,67 @@ impl Aligner {
             req.options.split_size.as_str()
         };
 
-        let (tokens_starred, text_starred) = preprocess_text(
-            &raw_text,
-            req.options.romanize,
-            &req.options.language,
+        // Overlap CPU text prep with GPU emissions (text only needed for CTC).
+        let t0 = std::time::Instant::now();
+        let text_key = format!(
+            "{}|{}|{}|{}",
+            req.options.language,
             split,
-            &req.options.star_frequency,
-        )?;
-        let token_indices = tokens_to_indices(&tokens_starred, &self.vocab)?;
+            req.options.star_frequency,
+            req.options.romanize
+        );
+        let romanize = req.options.romanize;
+        let language = req.options.language.clone();
+        let star_frequency = req.options.star_frequency.clone();
+        let split_owned = split.to_string();
+        let opts = req.options.clone();
+        let text_path = req.text_path.clone();
+        let (text_out, em_out) = std::thread::scope(|scope| {
+            let text_h = scope.spawn(|| {
+                {
+                    let cache = self.text_cache.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some((p, k, tok, txt, idx)) = cache.as_ref() {
+                        if p == &text_path && k == &text_key {
+                            return Ok::<_, anyhow::Error>((
+                                tok.clone(),
+                                txt.clone(),
+                                idx.clone(),
+                            ));
+                        }
+                    }
+                }
+                let (tokens_starred, text_starred) = preprocess_text(
+                    &raw_text,
+                    romanize,
+                    &language,
+                    &split_owned,
+                    &star_frequency,
+                )?;
+                let token_indices = tokens_to_indices(&tokens_starred, &self.vocab)?;
+                {
+                    let mut cache = self.text_cache.lock().unwrap_or_else(|e| e.into_inner());
+                    *cache = Some((
+                        text_path.clone(),
+                        text_key.clone(),
+                        tokens_starred.clone(),
+                        text_starred.clone(),
+                        token_indices.clone(),
+                    ));
+                }
+                Ok((tokens_starred, text_starred, token_indices))
+            });
+            let em_h = scope.spawn(|| self.generate_emissions(waveform.as_slice(), &opts));
+            (text_h.join().expect("text thread"), em_h.join().expect("em thread"))
+        });
+        let (tokens_starred, text_starred, token_indices) = text_out?;
+        let (emissions, t, c, stride_ms) = em_out?;
+        let t_parallel = t0.elapsed();
+        let t_text = t_parallel; // overlapped
+        let t_em = t_parallel;
 
-        let (emissions, t, c, stride_ms) = self.generate_emissions(&waveform, &req.options)?;
-
+        let t0 = std::time::Instant::now();
         let (paths, scores) = forced_align(&emissions, t, c, &token_indices, self.blank_id)?;
+        let t_ctc = t0.elapsed();
 
         let idx_to_token: std::collections::HashMap<usize, String> =
             self.vocab.iter().map(|(k, &v)| (v, k.clone())).collect();
@@ -169,6 +253,7 @@ impl Aligner {
             .cloned()
             .unwrap_or_else(|| "<blank>".into());
 
+        let t0 = std::time::Instant::now();
         let segments = merge_repeats(&paths, &idx_to_token);
         let spans = get_spans(&tokens_starred, &segments, &blank_label)?;
         let items = spans_to_items(
@@ -178,6 +263,21 @@ impl Aligner {
             &scores,
             req.options.merge_threshold,
         );
+        let t_post = t0.elapsed();
+
+        if profile {
+            eprintln!(
+                "[CTC_PROFILE align] audio={:.3}s text={:.3}s emissions={:.3}s ctc={:.3}s post={:.3}s total={:.3}s T={t} L={} items={}",
+                t_audio.as_secs_f64(),
+                t_text.as_secs_f64(),
+                t_em.as_secs_f64(),
+                t_ctc.as_secs_f64(),
+                t_post.as_secs_f64(),
+                t_all.elapsed().as_secs_f64(),
+                token_indices.len(),
+                items.len()
+            );
+        }
 
         Ok(ForcedAlignResult {
             items,
@@ -195,13 +295,15 @@ impl Aligner {
         let (mut logits, t, c) = self.generate_emissions_logits(waveform, opts)?;
         log_softmax_rows_inplace(&mut logits, t, c);
 
-        // Python appends a star column of zeros.
-        let mut emissions = Vec::with_capacity(t * (c + 1));
-        for row in 0..t {
-            emissions.extend_from_slice(&logits[row * c..(row + 1) * c]);
-            emissions.push(0.0);
-        }
+        // Python appends a star column of zeros — single pass pack.
         let c_em = c + 1;
+        let mut emissions = vec![0.0f32; t * c_em];
+        for row in 0..t {
+            let src = row * c;
+            let dst = row * c_em;
+            emissions[dst..dst + c].copy_from_slice(&logits[src..src + c]);
+            // emissions[dst + c] already 0
+        }
 
         let stride = waveform.len() as f32 * 1000.0 / t as f32 / SAMPLE_RATE as f32;
         let stride_ms = stride.ceil();
@@ -280,13 +382,7 @@ impl Aligner {
             #[cfg(feature = "cpu")]
             Engine::Cpu(eng) => eng.forward_logits_batch(waveforms),
             #[cfg(feature = "cuda")]
-            Engine::Cuda(eng) => {
-                // CUDA path still sequential (M2); keep behaviour correct.
-                waveforms
-                    .iter()
-                    .map(|w| eng.forward_logits(w))
-                    .collect()
-            }
+            Engine::Cuda(eng) => eng.forward_logits_batch(waveforms),
         }
     }
 

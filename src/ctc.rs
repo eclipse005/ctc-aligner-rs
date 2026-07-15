@@ -184,6 +184,24 @@ pub fn log_softmax_rows_into(src: &[f32], t: usize, c: usize, dst: &mut [f32]) {
 /// In-place log-softmax over rows of a dense `(T, C)` matrix.
 pub fn log_softmax_rows_inplace(logits: &mut [f32], t: usize, c: usize) {
     assert_eq!(logits.len(), t * c);
+    // Parallel over frames when rayon is available (default builds).
+    #[cfg(feature = "cpu")]
+    {
+        use rayon::prelude::*;
+        logits.par_chunks_mut(c).for_each(|row_slice| {
+            let max = row_slice.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0f32;
+            for v in row_slice.iter() {
+                sum += (*v - max).exp();
+            }
+            let log_z = max + sum.ln();
+            for v in row_slice.iter_mut() {
+                *v -= log_z;
+            }
+        });
+        return;
+    }
+    #[cfg(not(feature = "cpu"))]
     for row in 0..t {
         let base = row * c;
         let row_slice = &mut logits[base..base + c];

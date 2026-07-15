@@ -21,6 +21,11 @@ pub fn load_audio_mono_16k(path: &Path) -> Result<Vec<f32>> {
     if !path.exists() {
         bail!("audio not found: {}", path.display());
     }
+    // Fast path: already 16 kHz mono WAV — skip ffmpeg round-trip.
+    if let Ok(samples) = try_load_native_16k_mono_wav(path) {
+        return Ok(samples);
+    }
+
     let ffmpeg = find_ffmpeg()?;
     let tmp = tempfile_wav_path(path)?;
 
@@ -66,6 +71,23 @@ pub fn load_audio_mono_16k(path: &Path) -> Result<Vec<f32>> {
             tmp.display()
         )
     })
+}
+
+/// If `path` is already 16 kHz mono WAV, decode in-process (no ffmpeg).
+fn try_load_native_16k_mono_wav(path: &Path) -> Result<Vec<f32>> {
+    let mut reader = WavReader::open(path)?;
+    let spec = reader.spec();
+    if spec.sample_rate != SAMPLE_RATE || spec.channels != 1 {
+        bail!("not native 16k mono");
+    }
+    match spec.sample_format {
+        SampleFormat::Int if spec.bits_per_sample == 16 => reader
+            .samples::<i16>()
+            .map(|s| s.map(|v| v as f32 / 32768.0).map_err(Into::into))
+            .collect(),
+        SampleFormat::Float => reader.samples::<f32>().map(|s| s.map_err(Into::into)).collect(),
+        _ => bail!("unsupported native wav format"),
+    }
 }
 
 /// Back-compat name used by inference.
