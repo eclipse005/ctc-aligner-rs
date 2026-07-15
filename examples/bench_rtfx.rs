@@ -4,7 +4,7 @@
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let model = std::env::args().nth(1).unwrap_or_else(|| {
-        r"D:\ctc-forced-aligner\_model\models--MahmoudAshraf--mms-300m-1130-forced-aligner\snapshots\2d856eb340893e274480dfb15a7b2a94d7ab7f84".into()
+        r"D:\ctc-aligner-rs\models\mms-300m-1130-forced-aligner".into()
     });
     let audio = std::env::args().nth(2).unwrap_or_else(|| r"D:\ctc-forced-aligner\tests\3m.wav".into());
     let text = std::env::args().nth(3).unwrap_or_else(|| r"D:\ctc-forced-aligner\tests\3m.txt".into());

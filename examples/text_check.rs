@@ -6,7 +6,7 @@ fn main() -> anyhow::Result<()> {
     for (a,b) in ts.iter().zip(xs.iter()).take(12) {
         println!("{a:?} <- {b:?}");
     }
-    let model = std::path::PathBuf::from(r"D:\ctc-forced-aligner\_model\models--MahmoudAshraf--mms-300m-1130-forced-aligner\snapshots\2d856eb340893e274480dfb15a7b2a94d7ab7f84");
+    let model = std::path::PathBuf::from(r"D:\ctc-aligner-rs\models\mms-300m-1130-forced-aligner");
     let vocab = ctc_forced_aligner_rs::text::load_vocab(&model)?;
     let ids = ctc_forced_aligner_rs::text::tokens_to_indices(&ts, &vocab)?;
     println!("n ids {}", ids.len());

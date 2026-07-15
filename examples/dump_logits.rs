@@ -1,6 +1,6 @@
 fn main() -> anyhow::Result<()> {
     env_logger::init();
-    let model = std::path::PathBuf::from(r"D:\ctc-forced-aligner\_model\models--MahmoudAshraf--mms-300m-1130-forced-aligner\snapshots\2d856eb340893e274480dfb15a7b2a94d7ab7f84");
+    let model = std::path::PathBuf::from(r"D:\ctc-aligner-rs\models\mms-300m-1130-forced-aligner");
     let cfg = ctc_forced_aligner_rs::config::ModelConfig::load(&model)?;
     let eng = ctc_forced_aligner_rs::cpu_engine::CpuEngine::load(&model, cfg)?;
     let wave = ctc_forced_aligner_rs::audio_io::load_wav_mono_f32(std::path::Path::new(r"D:\ctc-forced-aligner\tests\en15s.wav"))?;
