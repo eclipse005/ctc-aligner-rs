@@ -19,12 +19,18 @@
 - SIMD 由 matmul 库在**运行时**探测（有 AVX2/NEON 就用，没有就标量/更弱路径）
 - CUDA 为 **optional feature**，无卡机器自动可走 GPU，无卡仍走 CPU
 
-### 验证（golden = 原版 Python）
+### 音频预处理
 
-| Fixture | 词数 | within 20ms | 备注 |
-|---------|------|-------------|------|
-| `tests/3m` | 597 | 597/597 | load-once ≈ 官方 Python CPU RTFx |
-| `tests/15m` | 2848 | 2844/2848 | 长音频窗口推理 |
+一律经 **ffmpeg** 转为 16 kHz mono pcm_s16le（`FFMPEG` 环境变量 / 仓库内 ffmpeg / PATH）。
+
+### 验证（golden = 现跑原版 Python，同 flags）
+
+| Fixture | 词数 | 逐帧一致 | max dt |
+|---------|------|----------|--------|
+| `tests/3m` | 597 | **597/597** | less than 0.01 ms |
+| `tests/15m` | 2848 | **2848/2848** | less than 0.03 ms |
+
+旧 `tests/*.json` 可能与当前 Python 参数不一致；以现跑 Python 为准。
 
 ```bash
 # CPU-only（通用发布）
