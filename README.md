@@ -175,15 +175,6 @@ cargo run --release -- align \
 
 `--device`：`auto` | `cuda` | `cuda:0` | `cpu`
 
-```bash
-# CUDA 加载冒烟
-cargo run --release --example check_cuda -- D:\ctc-aligner-rs\models\mms-300m-1130-forced-aligner
-
-# load-once RTFx：args = model audio text n_runs device
-cargo run --release --example bench_rtfx -- \
-  D:\ctc-aligner-rs\models\mms-300m-1130-forced-aligner audio.wav text.txt 3 cuda
-```
-
 ---
 
 ## 正确性与性能（参考）

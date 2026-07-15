@@ -1,7 +1,7 @@
 //! Precompiled multi-arch PTX selection (scheme B).
 //!
 //! Same design as `qwen-aligner-rs` / `cohere-transcribe-native`:
-//! - Offline: `scripts/compile-ptx.ps1` → `ptx/kernels_smXX.ptx`
+//! - Prebuilt PTX lives in `ptx/kernels_smXX.ptx` (rebuild offline with nvcc if kernels change)
 //! - Embed at compile time via `include_str!`
 //! - Runtime: pick highest prebuilt SM ≤ device compute capability
 //! - End users need **no** CUDA Toolkit / NVRTC (only driver + cudart/cublas DLL)
