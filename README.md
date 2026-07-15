@@ -10,7 +10,25 @@
 
 ## 状态
 
-脚手架阶段：CTC Viterbi 已实现并对齐 Python 语义；Wav2Vec2 forward（CPU/CUDA）待实现。
+**CPU 端到端已跑通**，与原版 Python 时间戳对齐（见下方验证）。CUDA 引擎仍为 stub（M2）。
+
+### 验证（golden = 原版 Python）
+
+| Fixture | 词数 | within 20ms | 备注 |
+|---------|------|-------------|------|
+| en15s | 35 | 35/35 | logits maxabs≈0.0027 vs Py CPU |
+| `tests/3m` | 597 | 597/597 | 窗口推理，~1.7× RTFx (CPU) |
+| gxt 6s | 17 | 17/17 | |
+
+```bash
+# CPU-only release
+cargo build --release --no-default-features --features cpu
+
+cargo run --release --no-default-features --features cpu -- align \
+  --model path/to/mms-300m-1130-forced-aligner \
+  --audio tests/3m.wav --text tests/3m.txt \
+  --language eng --device cpu --output out.json
+```
 
 ## Features
 
