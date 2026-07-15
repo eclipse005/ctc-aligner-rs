@@ -154,8 +154,8 @@ impl LayerNorm {
 }
 
 struct Conv1dLayer {
-    /// [out_ch, in_ch, k]
-    w: Vec<f32>,
+    /// [out_ch, in_ch * k] row-major — ready for gemm as W in y = col @ W^T.
+    w_mat: Vec<f32>,
     b: Vec<f32>,
     out_ch: usize,
     in_ch: usize,
@@ -165,62 +165,119 @@ struct Conv1dLayer {
 }
 
 impl Conv1dLayer {
-    fn forward(&self, x: &[f32], in_len: usize) -> Result<(Vec<f32>, usize)> {
-        // x: [in_ch, L]
-        if x.len() != self.in_ch * in_len {
+    fn from_parts(
+        w_och_ic_k: Vec<f32>,
+        b: Vec<f32>,
+        out_ch: usize,
+        in_ch: usize,
+        k: usize,
+        stride: usize,
+        ln: Option<LayerNorm>,
+    ) -> Self {
+        // Re-pack [out, in, k] → [out, in*k] (already that order in row-major).
+        debug_assert_eq!(w_och_ic_k.len(), out_ch * in_ch * k);
+        Self {
+            w_mat: w_och_ic_k,
+            b,
+            out_ch,
+            in_ch,
+            k,
+            stride,
+            ln,
+        }
+    }
+
+    /// x layout: [T_in, in_ch] row-major. Returns [T_out, out_ch] after conv+LN+GELU.
+    fn forward_tc(&self, x: &[f32], t_in: usize) -> Result<(Vec<f32>, usize)> {
+        if x.len() != t_in * self.in_ch {
             bail!(
-                "conv1d input size {} != {}*{}",
+                "conv1d TC input {} != {}*{}",
                 x.len(),
-                self.in_ch,
-                in_len
+                t_in,
+                self.in_ch
             );
         }
-        if in_len < self.k {
-            bail!("conv1d: sequence shorter than kernel ({in_len} < {})", self.k);
+        if t_in < self.k {
+            bail!("conv1d: sequence shorter than kernel ({t_in} < {})", self.k);
         }
-        let out_len = (in_len - self.k) / self.stride + 1;
-        let mut y = vec![0.0f32; self.out_ch * out_len];
-        // Parallel over output channels.
-        y.par_chunks_mut(out_len)
-            .enumerate()
-            .for_each(|(oc, y_ch)| {
-                let w_base = oc * self.in_ch * self.k;
-                for t in 0..out_len {
-                    let mut acc = self.b[oc];
-                    let t0 = t * self.stride;
-                    for ic in 0..self.in_ch {
-                        let x_base = ic * in_len + t0;
-                        let w_row = w_base + ic * self.k;
-                        for kk in 0..self.k {
-                            acc += x[x_base + kk] * self.w[w_row + kk];
-                        }
-                    }
-                    y_ch[t] = acc;
+        let t_out = (t_in - self.k) / self.stride + 1;
+        let kk = self.in_ch * self.k;
+
+        // im2col as [T_out, in_ch*k] then y = col @ W^T → [T_out, out_ch]
+        // Build col first, then gemm — never hold TLS RefCell across rayon gemm
+        // (gemm workers can re-enter this thread and re-borrow TLS).
+        let mut col = vec![0.0f32; t_out * kk];
+        let in_ch = self.in_ch;
+        let k = self.k;
+        let stride = self.stride;
+        col.par_chunks_mut(kk).enumerate().for_each(|(t, row)| {
+            let t0 = t * stride;
+            for ic in 0..in_ch {
+                for ki in 0..k {
+                    row[ic * k + ki] = x[(t0 + ki) * in_ch + ic];
+                }
+            }
+        });
+        let mut y = vec![0.0f32; t_out * self.out_ch];
+        unsafe {
+            gemm(
+                t_out,
+                self.out_ch,
+                kk,
+                y.as_mut_ptr(),
+                1,
+                self.out_ch as isize,
+                false,
+                col.as_ptr(),
+                1,
+                kk as isize,
+                self.w_mat.as_ptr(),
+                kk as isize,
+                1,
+                0.0,
+                1.0,
+                false,
+                false,
+                false,
+                Parallelism::Rayon(0),
+            );
+        }
+
+        // bias + LN (over out_ch) + GELU — all on [T, C] rows.
+        let out_ch = self.out_ch;
+        let bias = &self.b;
+        if let Some(ln) = &self.ln {
+            let w = &ln.w;
+            let b = &ln.b;
+            let eps = ln.eps;
+            y.par_chunks_mut(out_ch).for_each(|row| {
+                for j in 0..out_ch {
+                    row[j] += bias[j];
+                }
+                let mean = row.iter().sum::<f32>() / out_ch as f32;
+                let mut var = 0.0f32;
+                for &v in row.iter() {
+                    let d = v - mean;
+                    var += d * d;
+                }
+                var /= out_ch as f32;
+                let inv = (var + eps).sqrt().recip();
+                for j in 0..out_ch {
+                    row[j] = gelu((row[j] - mean) * inv * w[j] + b[j]);
                 }
             });
-
-        // LayerNorm over channel dim at each time: HF does transpose → LN(last=out_ch) → transpose
-        // y is [out_ch, T]; we need LN across out_ch for each t.
-        if let Some(ln) = &self.ln {
-            // Convert to [T, out_ch], LN, back.
-            let mut tmp = vec![0.0f32; out_len * self.out_ch];
-            for t in 0..out_len {
-                for c in 0..self.out_ch {
-                    tmp[t * self.out_ch + c] = y[c * out_len + t];
+        } else {
+            y.par_chunks_mut(out_ch).for_each(|row| {
+                for j in 0..out_ch {
+                    row[j] = gelu(row[j] + bias[j]);
                 }
-            }
-            ln.forward_inplace(&mut tmp, out_len);
-            for t in 0..out_len {
-                for c in 0..self.out_ch {
-                    y[c * out_len + t] = tmp[t * self.out_ch + c];
-                }
-            }
+            });
         }
-
-        y.par_iter_mut().for_each(|v| *v = gelu(*v));
-        Ok((y, out_len))
+        Ok((y, t_out))
     }
 }
+
+
 
 struct EncoderLayer {
     ln_attn: LayerNorm,
@@ -286,15 +343,19 @@ fn with_attn_scratch<R>(t: usize, h: usize, n_heads: usize, head_dim: usize, f: 
     thread_local! {
         static SCRATCH: std::cell::RefCell<Option<AttnScratch>> = const { std::cell::RefCell::new(None) };
     }
+    // Take scratch out of TLS so we never hold RefCell across rayon gemm
+    // (workers can re-enter this thread and would otherwise double-borrow).
+    let mut sc = SCRATCH.with(|cell| {
+        cell.borrow_mut()
+            .take()
+            .unwrap_or_else(|| AttnScratch::with_capacity(t, h, n_heads, head_dim))
+    });
+    sc.ensure(t, h, n_heads, head_dim);
+    let out = f(&mut sc);
     SCRATCH.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(AttnScratch::with_capacity(t, h, n_heads, head_dim));
-        }
-        let sc = slot.as_mut().unwrap();
-        sc.ensure(t, h, n_heads, head_dim);
-        f(sc)
-    })
+        *cell.borrow_mut() = Some(sc);
+    });
+    out
 }
 
 pub struct CpuEngine {
@@ -349,15 +410,15 @@ impl CpuEngine {
             } else {
                 None
             };
-            conv_layers.push(Conv1dLayer {
+            conv_layers.push(Conv1dLayer::from_parts(
                 w,
                 b,
                 out_ch,
                 in_ch,
                 k,
-                stride: config.conv_stride[i],
+                config.conv_stride[i],
                 ln,
-            });
+            ));
         }
 
         let feat_proj_ln =
@@ -475,12 +536,16 @@ impl CpuEngine {
             return Ok(Vec::new());
         }
         let b = waveforms.len();
+        let profile = std::env::var("CTC_PROFILE").ok().as_deref() == Some("1");
+        let t0 = std::time::Instant::now();
+
         // Frontend (conv + proj + pos) — parallel over batch.
         let frontends: Result<Vec<Vec<f32>>> = waveforms
             .par_iter()
             .map(|w| self.frontend_hidden(w))
             .collect();
         let hiddens = frontends?;
+        let t_front = t0.elapsed();
         let h = self.config.hidden_size;
         let t = hiddens[0].len() / h;
         for hid in &hiddens {
@@ -495,7 +560,6 @@ impl CpuEngine {
             stacked[bi * t * h..(bi + 1) * t * h].copy_from_slice(hid);
         }
 
-        let profile = std::env::var("CTC_PROFILE").ok().as_deref() == Some("1");
         let t_enc0 = std::time::Instant::now();
         let mut t_attn = std::time::Duration::ZERO;
         let mut t_ffn = std::time::Duration::ZERO;
@@ -538,10 +602,12 @@ impl CpuEngine {
         let vocab = self.lm_head.out;
         if profile {
             eprintln!(
-                "[CTC_PROFILE] B={b} T={t} attn={:.3}s ffn={:.3}s enc_total={:.3}s",
+                "[CTC_PROFILE] B={b} T={t} frontend={:.3}s attn={:.3}s ffn={:.3}s enc={:.3}s total={:.3}s",
+                t_front.as_secs_f64(),
                 t_attn.as_secs_f64(),
                 t_ffn.as_secs_f64(),
-                t_enc0.elapsed().as_secs_f64()
+                t_enc0.elapsed().as_secs_f64(),
+                t0.elapsed().as_secs_f64()
             );
         }
 
@@ -554,10 +620,17 @@ impl CpuEngine {
     }
 
     /// Conv feature extractor + projection + positional conv → [T, H].
+    ///
+    /// Feature stack stays in **[T, C] row-major** end-to-end (im2col + gemm + LN),
+    /// matching HF numerics (LN over channels) without [C,T]↔[T,C] thrash.
     fn frontend_hidden(&self, waveform: &[f32]) -> Result<Vec<f32>> {
-        let mut x = waveform.to_vec();
-        let mut len = x.len();
+        // Waveform as [T, 1]
+        let mut t_len = waveform.len();
+        let mut x = vec![0.0f32; t_len];
+        x.copy_from_slice(waveform);
+        // in_ch = 1 for first layer
         let mut channels = 1usize;
+
         for (li, conv) in self.conv_layers.iter().enumerate() {
             if channels != conv.in_ch {
                 bail!(
@@ -565,26 +638,22 @@ impl CpuEngine {
                     conv.in_ch
                 );
             }
-            let (y, out_len) = conv.forward(&x, len)?;
+            let (y, t_out) = conv.forward_tc(&x, t_len)?;
             x = y;
-            len = out_len;
+            t_len = t_out;
             channels = conv.out_ch;
         }
-        let t_feat = len;
-        let c_feat = channels;
-        let mut hidden = vec![0.0f32; t_feat * c_feat];
-        for ti in 0..t_feat {
-            for c in 0..c_feat {
-                hidden[ti * c_feat + c] = x[c * t_feat + ti];
-            }
-        }
-        self.feat_proj_ln.forward_inplace(&mut hidden, t_feat);
-        hidden = self.feat_proj.forward(&hidden, t_feat);
+
+        // x: [T, 512]
+        let t_feat = t_len;
+        self.feat_proj_ln.forward_inplace(&mut x, t_feat);
+        let mut hidden = self.feat_proj.forward(&x, t_feat);
         let h = self.config.hidden_size;
         let pos = self.pos_conv_embed(&hidden, t_feat)?;
-        hidden.par_iter_mut().zip(pos.par_iter()).for_each(|(a, &b)| {
-            *a += b;
-        });
+        hidden
+            .par_iter_mut()
+            .zip(pos.par_iter())
+            .for_each(|(a, &b)| *a += b);
         debug_assert_eq!(hidden.len(), t_feat * h);
         Ok(hidden)
     }
@@ -628,65 +697,80 @@ impl CpuEngine {
     }
 
     fn pos_conv_embed(&self, hidden: &[f32], t: usize) -> Result<Vec<f32>> {
-        // hidden [T, H] → conv over time with groups, same padding then remove 1 if even k
+        // Grouped conv1d on [T, H]: groups independent, each is dense conv over in_g ch.
+        // Keep [T, H] layout; im2col+gemm per group (no [H,T] transpose thrash).
         let h = self.config.hidden_size;
         let k = self.pos_k;
         let groups = self.pos_groups;
-        let in_g = h / groups; // channels per group
-        // pad both sides by k//2
+        let in_g = h / groups;
         let pad = k / 2;
         let t_pad = t + 2 * pad;
-        // x_ch: [H, T_pad]
-        let mut x = vec![0.0f32; h * t_pad];
-        for ti in 0..t {
-            for c in 0..h {
-                x[c * t_pad + (ti + pad)] = hidden[ti * h + c];
-            }
-        }
-        let out_len_full = t_pad - k + 1; // stride 1
-        // after SamePad with even k, remove last frame → should equal t
         let remove = if k % 2 == 0 { 1 } else { 0 };
-        let out_len = out_len_full - remove;
-        if out_len != t {
-            // HF SamePad: if even kernel, remove 1 from the end
-            log::debug!("pos_conv out_len={out_len} t={t} full={out_len_full}");
-        }
-        let use_len = out_len.min(t);
-        let mut y = vec![0.0f32; h * use_len];
+        let out_len_full = t_pad - k + 1;
+        let use_len = (out_len_full - remove).min(t);
 
-        // Grouped conv1d: groups independent, each group has in_g in and out_g=in_g out channels
-        // weight shape [H, in_g, k] where H = groups * out_per_group, out_per_group = in_g
-        y.par_chunks_mut(use_len)
-            .enumerate()
-            .for_each(|(oc, y_ch)| {
-                let g = oc / in_g;
-                let local_oc = oc % in_g;
-                let _ = local_oc;
-                // For grouped conv, output channel oc only sees input channels [g*in_g, (g+1)*in_g)
-                // weight row oc: [in_g, k]
-                let w_base = oc * in_g * k;
-                for ti in 0..use_len {
-                    let mut acc = self.pos_b[oc];
-                    for ic_local in 0..in_g {
-                        let ic = g * in_g + ic_local;
-                        let x_base = ic * t_pad + ti;
-                        let w_row = w_base + ic_local * k;
-                        for kk in 0..k {
-                            acc += x[x_base + kk] * self.pos_w[w_row + kk];
-                        }
+        // Pad time: [T_pad, H]
+        let mut x_pad = vec![0.0f32; t_pad * h];
+        x_pad[pad * h..(pad + t) * h].copy_from_slice(&hidden[..t * h]);
+
+        let out_addr = {
+            let mut out = vec![0.0f32; t * h];
+            let addr = out.as_mut_ptr() as usize;
+            // Leak ownership into parallel phase via addr; reclaim after join.
+            std::mem::forget(out);
+            addr
+        };
+        let kk = in_g * k;
+        // Parallel over groups (16 independent gemms), disjoint channel writes.
+        (0..groups).into_par_iter().for_each(|g| {
+            let mut col = vec![0.0f32; use_len * kk];
+            for ti in 0..use_len {
+                for ic in 0..in_g {
+                    let ch = g * in_g + ic;
+                    for ki in 0..k {
+                        col[ti * kk + ic * k + ki] = x_pad[(ti + ki) * h + ch];
                     }
-                    y_ch[ti] = gelu(acc);
                 }
-            });
-
-        // transpose [H, T] → [T, H], pad/truncate to t
-        let mut out = vec![0.0f32; t * h];
-        let copy_t = use_len.min(t);
-        for ti in 0..copy_t {
-            for c in 0..h {
-                out[ti * h + c] = y[c * use_len + ti];
             }
-        }
+            // pos_w [H, in_g*k] rows for this group's out channels
+            let w_g = &self.pos_w[g * in_g * kk..(g + 1) * in_g * kk];
+            let mut y_g = vec![0.0f32; use_len * in_g];
+            unsafe {
+                gemm(
+                    use_len,
+                    in_g,
+                    kk,
+                    y_g.as_mut_ptr(),
+                    1,
+                    in_g as isize,
+                    false,
+                    col.as_ptr(),
+                    1,
+                    kk as isize,
+                    w_g.as_ptr(),
+                    kk as isize,
+                    1,
+                    0.0,
+                    1.0,
+                    false,
+                    false,
+                    false,
+                    Parallelism::None,
+                );
+            }
+            let out_ptr = out_addr as *mut f32;
+            for ti in 0..use_len {
+                for j in 0..in_g {
+                    let oc = g * in_g + j;
+                    let v = gelu(y_g[ti * in_g + j] + self.pos_b[oc]);
+                    unsafe {
+                        *out_ptr.add(ti * h + oc) = v;
+                    }
+                }
+            }
+        });
+        // SAFETY: reconstitute Vec after all group writers finished.
+        let out = unsafe { Vec::from_raw_parts(out_addr as *mut f32, t * h, t * h) };
         Ok(out)
     }
 
@@ -726,12 +810,15 @@ fn multihead_attention_fused(
     let n_heads = layer.n_heads;
     let head_dim = layer.head_dim;
     let scale = 1.0f32 / (head_dim as f32).sqrt();
+    // Policy (profiled on 20-core AVX2, T≈1700):
+    // Sequential heads + multi-thread gemm ≈ 13× RTFx.
+    // Parallel heads + ST gemm regressed to ~5× (too many small T×T jobs).
     let gemm_par = if outer_parallel {
         Parallelism::None
     } else {
         Parallelism::Rayon(0)
     };
-    let par_heads = outer_parallel || t < 512;
+    let par_heads = outer_parallel;
     let head_stride = t * head_dim;
 
     with_attn_scratch(t, h, n_heads, head_dim, |sc| {
