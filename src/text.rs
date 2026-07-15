@@ -1,14 +1,22 @@
-//! Text normalization + tokenization stubs.
+//! Text normalization + tokenization matching Python `text_utils.py`.
 //!
-//! Full Python parity (uroman, norm_config, star injection, word/char split)
-//! lands in M1. For now we only provide light helpers used by the scaffold.
+//! Golden: `ctc_forced_aligner.text_utils.preprocess_text` with romanize=True
+//! (MMS character vocab path).
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
+use regex::Regex;
+use unicode_normalization::UnicodeNormalization;
+use uroman::{rom_format, Uroman};
 
-/// Load `vocab.json` as lowercase token → id map (matches Python get_alignments).
+thread_local! {
+    static UROMAN: Uroman = Uroman::new();
+}
+
+/// Load `vocab.json` as lowercase token → id, then append `<star>`.
 pub fn load_vocab(model_dir: &Path) -> Result<HashMap<String, usize>> {
     let path = model_dir.join("vocab.json");
     let raw = std::fs::read_to_string(&path)
@@ -24,7 +32,160 @@ pub fn load_vocab(model_dir: &Path) -> Result<HashMap<String, usize>> {
     Ok(lower)
 }
 
-/// Map space-joined romanized tokens to vocab indices (Python get_alignments).
+/// Python `text_normalize` for the default / English config subset.
+pub fn text_normalize(text: &str, _iso_code: &str) -> String {
+    // unicode NFKC-ish: Python uses config unicode_norm (often NFKC)
+    let mut text: String = text.nfkc().collect();
+    text = text.to_lowercase();
+
+    // always strip brackets containing digits, e.g. "(Sam 23:17)"
+    static RE_BRACKETS_NUM: OnceLock<Regex> = OnceLock::new();
+    let re_bn = RE_BRACKETS_NUM.get_or_init(|| Regex::new(r"\([^\)]*\d[^\)]*\)").unwrap());
+    text = re_bn.replace_all(&text, " ").into_owned();
+
+    // basic punctuation → space (period ? , : ! { } ")
+    static RE_PUNC: OnceLock<Regex> = OnceLock::new();
+    let re_punc = RE_PUNC.get_or_init(|| Regex::new(r#"[.?!,;:{}"]+"#).unwrap());
+    text = re_punc.replace_all(&text, " ").into_owned();
+
+    // remove pure digit words
+    static RE_DIGITS: OnceLock<Regex> = OnceLock::new();
+    let re_digits = RE_DIGITS.get_or_init(|| {
+        Regex::new(r"(^|\s)\d+(\s|$)").unwrap()
+    });
+    // apply repeatedly for overlapping
+    for _ in 0..8 {
+        let next = re_digits.replace_all(&text, " ").into_owned();
+        if next == text {
+            break;
+        }
+        text = next;
+    }
+
+    // collapse spaces
+    static RE_SPACE: OnceLock<Regex> = OnceLock::new();
+    let re_space = RE_SPACE.get_or_init(|| Regex::new(r"\s+").unwrap());
+    re_space.replace_all(text.trim(), " ").into_owned()
+}
+
+fn normalize_uroman(text: &str) -> String {
+    let text = text.to_lowercase();
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"([^a-z' ])").unwrap());
+    let text = re.replace_all(&text, " ");
+    static RE_SPACE: OnceLock<Regex> = OnceLock::new();
+    let re_space = RE_SPACE.get_or_init(|| Regex::new(r" +").unwrap());
+    re_space.replace_all(text.trim(), " ").into_owned()
+}
+
+/// Python `get_uroman_tokens`.
+pub fn get_uroman_tokens(norm_transcripts: &[String], iso: Option<&str>) -> Vec<String> {
+    UROMAN.with(|u| {
+        let mut out = Vec::with_capacity(norm_transcripts.len());
+        for t in norm_transcripts {
+            let romanized: String = u
+                .romanize_string::<rom_format::Str>(t, iso)
+                .to_output_string();
+            // Python: ot = " ".join(ot.strip())  → space-separate characters
+            let chars_spaced: String = romanized
+                .trim()
+                .chars()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            static RE_SPACE: OnceLock<Regex> = OnceLock::new();
+            let re_space = RE_SPACE.get_or_init(|| Regex::new(r"\s+").unwrap());
+            let ot = re_space.replace_all(chars_spaced.trim(), " ");
+            out.push(normalize_uroman(&ot));
+        }
+        out
+    })
+}
+
+/// Python `preprocess_text`.
+///
+/// Returns `(tokens_starred, text_starred)`.
+pub fn preprocess_text(
+    text: &str,
+    romanize: bool,
+    language: &str,
+    mut split_size: &str,
+    star_frequency: &str,
+) -> Result<(Vec<String>, Vec<String>)> {
+    if language == "jpn" || language == "chi" {
+        split_size = "char";
+    }
+    let text_split = split_text(text, split_size);
+    let norm_text: Vec<String> = text_split
+        .iter()
+        .map(|line| text_normalize(line.trim(), language))
+        .collect();
+
+    let tokens: Vec<String> = if romanize {
+        get_uroman_tokens(&norm_text, Some(language))
+    } else {
+        norm_text
+            .iter()
+            .map(|w| w.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" "))
+            .collect()
+    };
+
+    let (tokens_starred, text_starred) = match star_frequency {
+        "segment" => {
+            let mut ts = Vec::new();
+            let mut xs = Vec::new();
+            for (tok, chunk) in tokens.iter().zip(text_split.iter()) {
+                ts.push("<star>".into());
+                ts.push(tok.clone());
+                xs.push("<star>".into());
+                xs.push(chunk.clone());
+            }
+            (ts, xs)
+        }
+        "edges" | _ => {
+            let mut ts = vec!["<star>".into()];
+            ts.extend(tokens);
+            ts.push("<star>".into());
+            let mut xs = vec!["<star>".into()];
+            xs.extend(text_split);
+            xs.push("<star>".into());
+            (ts, xs)
+        }
+    };
+    Ok((tokens_starred, text_starred))
+}
+
+fn split_text(text: &str, split_size: &str) -> Vec<String> {
+    match split_size {
+        "char" => text.chars().map(|c| c.to_string()).collect(),
+        "sentence" => {
+            // fallback: split on . ! ?
+            let mut out = Vec::new();
+            let mut cur = String::new();
+            for ch in text.chars() {
+                cur.push(ch);
+                if matches!(ch, '.' | '!' | '?') {
+                    let t = cur.trim().to_string();
+                    if !t.is_empty() {
+                        out.push(t);
+                    }
+                    cur.clear();
+                }
+            }
+            let t = cur.trim().to_string();
+            if !t.is_empty() {
+                out.push(t);
+            }
+            if out.is_empty() && !text.trim().is_empty() {
+                out.push(text.trim().to_string());
+            }
+            out
+        }
+        _ => text.split_whitespace().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// Map space-joined romanized tokens to vocab indices (Python `get_alignments`).
 pub fn tokens_to_indices(tokens: &[String], vocab: &HashMap<String, usize>) -> Result<Vec<usize>> {
     let joined = tokens.join(" ");
     let mut out = Vec::new();
@@ -35,29 +196,14 @@ pub fn tokens_to_indices(tokens: &[String], vocab: &HashMap<String, usize>) -> R
         let key = part.to_lowercase();
         match vocab.get(&key) {
             Some(&id) => out.push(id),
-            None => bail!("token {:?} not in vocab", part),
+            None => {
+                // skip unknown (Python filters `if c in dictionary`)
+                log::warn!("token {part:?} not in vocab — skipped");
+            }
         }
     }
     if out.is_empty() {
         bail!("no tokens mapped into vocab");
     }
     Ok(out)
-}
-
-/// Minimal whitespace / CJK-ish split placeholder.
-///
-/// Real path must mirror Python `get_uroman_tokens` + `text_normalize`.
-pub fn split_text_placeholder(text: &str, split_size: &str) -> Vec<String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Vec::new();
-    }
-    match split_size {
-        "char" => text
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .map(|c| c.to_string())
-            .collect(),
-        _ => text.split_whitespace().map(|s| s.to_string()).collect(),
-    }
 }

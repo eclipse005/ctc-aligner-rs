@@ -100,9 +100,6 @@ fn main() -> Result<()> {
                 result.stride_ms,
                 output.display()
             );
-            println!(
-                "(note: Wav2Vec2 forward is not implemented yet — this path errors before write if engine is stub)"
-            );
         }
     }
     Ok(())

@@ -1,4 +1,4 @@
-//! Path → segments → timestamps (Python merge_repeats / get_spans / postprocess).
+//! Path → segments → timestamps (Python merge_repeats / get_spans / postprocess_results).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -42,6 +42,9 @@ pub fn merge_repeats(path: &[usize], idx_to_token: &HashMap<usize, String>) -> V
 }
 
 /// Map starred tokens onto collapsed segments → span ranges (Python `get_spans`).
+///
+/// Includes blank-padding into neighbouring silence (half-split), which is critical
+/// for timestamp boundaries matching the original Python package.
 pub fn get_spans(
     tokens: &[String],
     segments: &[Segment],
@@ -55,7 +58,7 @@ pub fn get_spans(
     for (seg_idx, seg) in segments.iter().enumerate() {
         if tokens_idx == tokens.len() {
             if seg_idx != segments.len() - 1 {
-                bail!("extra segments after tokens exhausted");
+                bail!("extra segments after tokens exhausted at seg {seg_idx}");
             }
             if seg.label != blank {
                 bail!("expected trailing blank, got {:?}", seg.label);
@@ -71,7 +74,11 @@ pub fn get_spans(
             continue;
         }
         if seg.label != ltr {
-            bail!("segment label {:?} != expected {:?}", seg.label, ltr);
+            bail!(
+                "segment label {:?} != expected {:?} (token_idx={tokens_idx} ltr={ltr_idx})",
+                seg.label,
+                ltr
+            );
         }
         if ltr_idx == 0 {
             start = seg_idx;
@@ -90,43 +97,101 @@ pub fn get_spans(
     }
 
     let mut spans = Vec::with_capacity(intervals.len());
-    for (s, e) in intervals {
-        spans.push(segments[s..=e].to_vec());
+    for (idx, &(s, e)) in intervals.iter().enumerate() {
+        let mut span = segments[s..=e].to_vec();
+        // Pad with half of neighbouring blank segments (Python get_spans).
+        if s > 0 {
+            let prev_seg = &segments[s - 1];
+            if prev_seg.label == blank {
+                let pad_start = if idx == 0 {
+                    prev_seg.start
+                } else {
+                    (prev_seg.start + prev_seg.end) / 2
+                };
+                span.insert(
+                    0,
+                    Segment {
+                        label: blank.to_string(),
+                        start: pad_start,
+                        end: span[0].start,
+                    },
+                );
+            }
+        }
+        if e + 1 < segments.len() {
+            let next_seg = &segments[e + 1];
+            if next_seg.label == blank {
+                let pad_end = if idx == intervals.len() - 1 {
+                    next_seg.end
+                } else {
+                    // math.floor((start+end)/2) — integer division for non-neg
+                    (next_seg.start + next_seg.end) / 2
+                };
+                let last_end = span.last().map(|x| x.end).unwrap_or(0);
+                span.push(Segment {
+                    label: blank.to_string(),
+                    start: last_end,
+                    end: pad_end,
+                });
+            }
+        }
+        spans.push(span);
     }
     Ok(spans)
 }
 
-/// Convert spans to timestamps in seconds.
+/// Python `postprocess_results` (score optional on public items).
+///
+/// End time uses inclusive `seg_end_idx * stride_ms / 1000` — **no +1**.
 pub fn spans_to_items(
     text_pieces: &[String],
     spans: &[Vec<Segment>],
     stride_ms: f32,
+    scores: &[f32],
+    merge_threshold: f32,
 ) -> Vec<ForcedAlignItem> {
     let mut items = Vec::new();
-    for (i, span) in spans.iter().enumerate() {
+    for (i, t) in text_pieces.iter().enumerate() {
+        if t == "<star>" {
+            continue;
+        }
+        if i >= spans.len() {
+            break;
+        }
+        let span = &spans[i];
         if span.is_empty() {
             continue;
         }
-        let start_frame = span.first().map(|s| s.start).unwrap_or(0);
-        let end_frame = span.last().map(|s| s.end).unwrap_or(0);
-        let start = (start_frame as f32 * stride_ms) / 1000.0;
-        // Python uses inclusive end frame → (end+1) * stride
-        let end = ((end_frame + 1) as f32 * stride_ms) / 1000.0;
-        let text = text_pieces.get(i).cloned().unwrap_or_default();
-        if text == "<star>" {
-            continue;
-        }
+        let seg_start_idx = span.first().map(|s| s.start).unwrap_or(0);
+        let seg_end_idx = span.last().map(|s| s.end).unwrap_or(0);
+        let start = seg_start_idx as f32 * stride_ms / 1000.0;
+        let end = seg_end_idx as f32 * stride_ms / 1000.0;
+        // Python: scores[seg_start_idx:seg_end_idx]  (end exclusive)
+        let score = if seg_end_idx > seg_start_idx && seg_end_idx <= scores.len() {
+            scores[seg_start_idx..seg_end_idx].iter().sum::<f32>()
+        } else {
+            0.0
+        };
         items.push(ForcedAlignItem {
-            start: round2(start as f64),
-            end: round2(end as f64),
-            text,
+            start: start as f64,
+            end: end as f64,
+            text: t.clone(),
+            score: Some(score as f64),
         });
     }
+    merge_segments(&mut items, merge_threshold);
     items
 }
 
-fn round2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
+fn merge_segments(segments: &mut [ForcedAlignItem], threshold: f32) {
+    if segments.is_empty() {
+        return;
+    }
+    for i in 0..segments.len() - 1 {
+        if (segments[i + 1].start - segments[i].end) < threshold as f64 {
+            segments[i + 1].start = segments[i].end;
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -134,6 +199,8 @@ struct JsonItem {
     start: f64,
     end: f64,
     text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score: Option<f64>,
 }
 
 pub fn write_forced_align_items_json(path: &Path, items: &[ForcedAlignItem]) -> Result<()> {
@@ -143,6 +210,7 @@ pub fn write_forced_align_items_json(path: &Path, items: &[ForcedAlignItem]) -> 
             start: i.start,
             end: i.end,
             text: i.text.clone(),
+            score: i.score,
         })
         .collect();
     let s = serde_json::to_string_pretty(&rows)?;

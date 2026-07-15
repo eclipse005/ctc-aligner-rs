@@ -106,11 +106,13 @@ pub struct AlignOptions {
     pub batch_size: usize,
     /// Language ISO code for text normalization (e.g. `eng`, `cmn`, `jpn`).
     pub language: String,
-    /// `word` | `char` | `auto`.
+    /// `word` | `char` | `sentence` | `auto`.
     pub split_size: String,
-    /// `segment` | `once` | `none` — star token injection frequency.
+    /// `segment` | `edges` — star token injection frequency.
     pub star_frequency: String,
     pub merge_threshold: f32,
+    /// Enable uroman (required for MMS latin char vocab on most languages).
+    pub romanize: bool,
 }
 
 impl Default for AlignOptions {
@@ -120,9 +122,10 @@ impl Default for AlignOptions {
             context_size_sec: 2.0,
             batch_size: 4,
             language: "eng".into(),
-            split_size: "auto".into(),
-            star_frequency: "segment".into(),
-            merge_threshold: 0.12,
+            split_size: "word".into(),
+            star_frequency: "edges".into(),
+            merge_threshold: 0.0,
+            romanize: true,
         }
     }
 }

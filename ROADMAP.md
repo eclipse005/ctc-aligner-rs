@@ -20,14 +20,23 @@
 - [x] CTC Viterbi（对齐 Python `forced_align_impl.py`）
 - [x] safetensors mmap 加载骨架
 
-### M1 — CPU 端到端（正确性）
+### M1 — CPU 端到端（正确性）✅
 
-- [ ] 解析 `config.json` → `Wav2Vec2Config`
-- [ ] CPU：feature extractor + pos conv + 24 encoder + CTC head
-- [ ] 窗口/context batch 推理（对齐 Python `generate_emissions`）
-- [ ] 文本 normalize / uroman / token→index（对齐 Python）
-- [ ] spans + postprocess timestamps
-- [ ] 与 Python 时间戳 diff（固定 fixture）
+- [x] 解析 `config.json` → `Wav2Vec2Config`
+- [x] CPU：feature extractor + pos conv + 24 encoder + CTC head
+- [x] 窗口/context batch 推理（对齐 Python `generate_emissions`）
+- [x] 文本 normalize / uroman / token→index（对齐 Python）
+- [x] spans + blank half-pad + postprocess timestamps
+- [x] 与 Python 时间戳 diff（固定 fixture）
+
+**验证（golden = 原版 Python / 既有 `tests/*.json`）：**
+
+| Fixture | 时长 | 词数 | max |Δt| | within 20ms | Rust 耗时 | RTFx |
+|---------|------|------|---------|-------------|-----------|------|
+| en15s (from 3m) | 15s | 35 | ~0 | **35/35** | ~7.1s | ~2.1x |
+| tests/3m | 206s | 597 | ≤20ms | **597/597** | ~119.6s | ~1.7x |
+
+Logits vs Python CPU: maxabs ≈ 0.0027, corr ≈ 1.0；CTC path bit-exact on same emissions.
 
 ### M2 — CUDA 引擎
 

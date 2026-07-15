@@ -4,6 +4,7 @@
 //! (transformers Wav2Vec2ForCTC + Viterbi forced alignment).
 
 pub mod audio_io;
+// re-export for diagnostics
 pub mod backend;
 pub mod config;
 pub mod ctc;
@@ -14,7 +15,7 @@ pub mod text;
 mod weights;
 
 #[cfg(feature = "cpu")]
-pub(crate) mod cpu_engine;
+pub mod cpu_engine;
 
 #[cfg(feature = "cuda")]
 pub(crate) mod cudarc_engine;
