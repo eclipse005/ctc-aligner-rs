@@ -53,26 +53,37 @@ Rayon 嵌套: 窗并行 + head 并行 + gemm 内并行  ← 过订阅
 3. **融合算子**（bias、激活）
 4. **进程内多次 forward 不重载模型**
 
-### 2.3 优化方向（按 ROI）
+### 2.3 可移植性红线（产品约束）
+
+| 要 | 不要 |
+|----|------|
+| **纯 Rust 默认依赖**（`gemm` + `rayon`） | **MKL / oneDNN / 厂商 BLAS**（安装难、许可/绑定绑死平台） |
+| **运行时**检测 SIMD（AVX2/NEON 等，`gemm`/`pulp` 已做） | **编译期** `-C target-cpu=native` 作为发布默认（二进制绑死本机） |
+| **任意 x86_64 / 常见 aarch64** 同一套代码 | 针对某一颗 CPU（如 Ultra 7 265K）写死调度 |
+| **CUDA 作可选 feature**（有卡就加速） | 把 CPU 路径做成「必须 Intel + MKL」 |
+
+bench 数字会在某台机器上量，但**算法与依赖必须通用**。  
+发布构建：默认 `cargo build --release`，**不**要求 `RUSTFLAGS=target-cpu=native`。
+
+### 2.4 优化方向（按 ROI，且遵守可移植红线）
 
 | 优先级 | 设计手段 | 预期 |
 |--------|----------|------|
-| P0 | **Scratch/Arena**：一次按 max_T 分配，热路径零 alloc | 1.3–2× |
-| P0 | **融合 QKV**：一次 gemm 出 3H | 1.1–1.3× |
-| P0 | **并行策略写死**：单序列多线程 gemm；禁止三重 rayon | 稳定满核 |
-| P1 | **权重布局**：load 时固定行主序 + 可选预转置；减少反复 pack | 1.1–1.5× |
-| P1 | **库式 API bench**：load 一次，多次 align（真 RTFx） | 口径正确 |
-| P2 | flash/online attn（减 T² 写带宽） | 中等 |
-| P2 | 链接 OpenBLAS/MKL 或 faer 顶级 matmul | 冲官方 CPU |
-| P3 | CUDA 手写（最终目标 40×+） | 数量级 |
+| P0 | **Scratch/Arena**：热路径零 alloc | 1.3–2× |
+| P0 | **融合 QKV**、im2col+gemm FE、[T,C] 布局 | 已做，大头 |
+| P0 | **并行策略写死**：禁止三重 rayon 过订阅 | 稳定满核 |
+| P1 | 继续纯 Rust：`gemm` 调度、权重布局、flash attn、少拷贝 | 再挤 1.2–1.5× |
+| P1 | 可选 **faer**（仍纯 Rust，无 MKL）做 A/B | 可能再挤一点 |
+| P2 | **CUDA 手写**（feature `cuda`，运行时探测） | 数量级，跨机「有 GPU 就快」 |
+| ❌ | MKL / 本机 native 编译作为交付默认 | 破坏通用性 |
 
-**Rust 新特性/最佳实践对应：**
+**Rust 最佳实践对应：**
 
-- `Scratch` + 复用 `Vec` 容量（或 `bumpalo`/自定义 arena）
-- 明确 `Send+Sync` 只读权重 + 每线程/每调用可变 scratch
-- `rayon` **单层**并行（要么 B，要么 heads，要么 gemm 内，三选一）
-- `#[inline]`、避免热路径 `Result` 分支炸栈（已 load 后的 shape 用 assert）
-- 特征 flag：`cpu` 路径纯计算；profiling 用 `CTC_PROFILE`
+- `Scratch` + 复用 `Vec`；TLS **take/put** 避免跨 rayon 重入
+- 只读权重 `Send+Sync` + 每调用可变 scratch
+- `rayon` **单层**并行
+- **运行时** SIMD（库内），不绑死发布 CPU 型号
+- feature：`cpu` / `cuda` 可裁剪
 
 ---
 
