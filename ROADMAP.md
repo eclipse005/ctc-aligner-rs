@@ -66,24 +66,31 @@
 
 ### M2 — CUDA 引擎 ⬅ **当前**
 
-对标 `qwen-aligner-rs`（`cudarc_engine` + `kernels.cu` + 预编译 PTX）。
+对标 `qwen-aligner-rs` + `cohere-transcribe-native`（voxtrans 同一套 PTX scheme B）。
 
-- [ ] `CudaState` 持有 context / stream / cuBLAS（现仅 probe）
-- [ ] safetensors → device 权重（f16/bf16 存储 + f32 累加，与 qwen 类似）
+**已完成（骨架）**
+
+- [x] `CudaState`：context / stream / cuBLAS workspace / prebuilt PTX
+- [x] `src/kernels/kernels.cu` + `scripts/compile-ptx.ps1` + `ptx/kernels_sm{61,70,75,80,86,89,90}.ptx`
+- [x] `prebuilt_ptx.rs` 运行时选 SM
+- [x] 全模型权重 f16 上传 + 融合 QKV；Linear / LN / GELU / softmax / head pack 启动封装
+- [x] `examples/check_cuda.rs` 冒烟加载
+
+**进行中**
+
 - [ ] GPU feature extractor（1D conv 栈 + LN + GELU）
-- [ ] GPU encoder：24 层 stable LN，MHA，FFN
-- [ ] lm_head → host emissions（或 GPU log_softmax）
-- [ ] 复用现有窗口拼接 / CTC / postprocess（可先 host CTC）
-- [ ] 与 **CPU / 现跑 Python** 帧级对齐（3m 必过，15m 必过）
-- [ ] RTFx：目标 **≥ 官方 Python CUDA**（约 40× on 3m/15m 量级）
+- [ ] GPU encoder：24 层 MHA + FFN（cuBLAS  batched QK/AV）
+- [ ] lm_head → host emissions
+- [ ] `forward_logits` 端到端 → 现有窗口/CTC/postprocess
+- [ ] 与 **CPU / 现跑 Python** 帧级对齐（3m + 15m）
+- [ ] RTFx ≥ 官方 Python CUDA（~40× 量级）
 
-**建议实现顺序**
+**实现顺序（续）**
 
-1. 权重上传 + Linear (cuBLAS GEMM) + LN/GELU kernel  
-2. FE conv（im2col on GPU 或自定义 1D conv）  
-3. Attention（grouped QKV + scaled matmul + softmax）  
-4. 端到端 forward_logits → 接现有 `generate_emissions`  
-5. 压测 + 对齐 golden  
+1. FE im2col/conv on GPU  
+2. Encoder layer (attn + ffn)  
+3. 端到端 + golden  
+4. 多窗 batch + fuse  
 
 ### M3 — CUDA RTFx 压榨
 

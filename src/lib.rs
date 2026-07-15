@@ -18,6 +18,8 @@ mod weights;
 pub mod cpu_engine;
 
 #[cfg(feature = "cuda")]
+pub(crate) mod prebuilt_ptx;
+#[cfg(feature = "cuda")]
 pub(crate) mod cudarc_engine;
 
 pub use backend::DeviceRequest;
