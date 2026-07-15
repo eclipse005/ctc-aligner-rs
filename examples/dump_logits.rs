@@ -15,8 +15,9 @@ fn main() -> anyhow::Result<()> {
         println!();
     }
     let bytes: Vec<u8> = logits.iter().flat_map(|f| f.to_le_bytes()).collect();
-    std::fs::write(r"D:\ctc-forced-aligner\ctc-aligner-rs\tmp\rust_logits_en15s.bin", &bytes)?;
-    std::fs::write(r"D:\ctc-forced-aligner\ctc-aligner-rs\tmp\rust_logits_shape.txt", format!("{t} {c}"))?;
+    std::fs::create_dir_all(r"D:\ctc-aligner-rs\tmp")?;
+    std::fs::write(r"D:\ctc-aligner-rs\tmp\rust_logits_en15s.bin", &bytes)?;
+    std::fs::write(r"D:\ctc-aligner-rs\tmp\rust_logits_shape.txt", format!("{t} {c}"))?;
     println!("max {} min {}", logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max), logits.iter().cloned().fold(f32::INFINITY, f32::min));
     Ok(())
 }

@@ -13,7 +13,8 @@ fn main() -> anyhow::Result<()> {
     println!("ids[:30] {:?}", &ids[..30.min(ids.len())]);
     // save
     let s = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
-    std::fs::write(r"D:\ctc-forced-aligner\ctc-aligner-rs\tmp\rust_ids.txt", s)?;
-    std::fs::write(r"D:\ctc-forced-aligner\ctc-aligner-rs\tmp\rust_tokens.json", serde_json::to_string_pretty(&ts)?)?;
+    std::fs::create_dir_all(r"D:\ctc-aligner-rs\tmp")?;
+    std::fs::write(r"D:\ctc-aligner-rs\tmp\rust_ids.txt", s)?;
+    std::fs::write(r"D:\ctc-aligner-rs\tmp\rust_tokens.json", serde_json::to_string_pretty(&ts)?)?;
     Ok(())
 }

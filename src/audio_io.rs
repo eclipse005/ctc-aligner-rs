@@ -149,6 +149,7 @@ fn find_ffmpeg() -> Result<PathBuf> {
     // Next to common monorepo layout: <repo>/ffmpeg/bin/ffmpeg.exe
     let candidates = [
         PathBuf::from(r"D:\ctc-forced-aligner\ffmpeg\bin\ffmpeg.exe"),
+        PathBuf::from(r"D:\ctc-aligner-rs\ffmpeg\bin\ffmpeg.exe"),
         PathBuf::from("ffmpeg/bin/ffmpeg.exe"),
         PathBuf::from("ffmpeg.exe"),
         PathBuf::from("ffmpeg"),
