@@ -228,14 +228,19 @@ impl Aligner {
         padded[context..context + n].copy_from_slice(waveform);
         let chunk_len = window + 2 * context;
 
+        // Gather equal-length window slices and run batched CPU forward (fat FFN gemms).
+        let slices: Vec<&[f32]> = (0..n_windows)
+            .map(|w| {
+                let start = w * window;
+                &padded[start..start + chunk_len]
+            })
+            .collect();
+
+        let batch_out = self.forward_logits_batch(&slices)?;
         let mut all = Vec::new();
         let mut c = 0usize;
-        for w in 0..n_windows {
-            let start = w * window;
-            let slice = &padded[start..start + chunk_len];
-            let (logits, t, vocab) = self.forward_logits(slice)?;
+        for (logits, t, vocab) in batch_out {
             c = vocab;
-            // Python: emissions[:, ctx : -ctx+1]
             let start_f = ctx_frames.min(t);
             let end_f = if t > ctx_frames {
                 t - ctx_frames + 1
@@ -264,6 +269,24 @@ impl Aligner {
             Engine::Cpu(eng) => eng.forward_logits(waveform),
             #[cfg(feature = "cuda")]
             Engine::Cuda(eng) => eng.forward_logits(waveform),
+        }
+    }
+
+    fn forward_logits_batch(
+        &self,
+        waveforms: &[&[f32]],
+    ) -> Result<Vec<(Vec<f32>, usize, usize)>> {
+        match &self.engine {
+            #[cfg(feature = "cpu")]
+            Engine::Cpu(eng) => eng.forward_logits_batch(waveforms),
+            #[cfg(feature = "cuda")]
+            Engine::Cuda(eng) => {
+                // CUDA path still sequential (M2); keep behaviour correct.
+                waveforms
+                    .iter()
+                    .map(|w| eng.forward_logits(w))
+                    .collect()
+            }
         }
     }
 
