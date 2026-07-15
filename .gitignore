@@ -1,0 +1,26 @@
+/target
+/Cargo.lock
+
+# Model weights (large, not in git)
+/models/
+*.safetensors
+*.onnx
+*.bin
+
+# Run outputs
+/out/
+/output/
+*.json
+!ptx/MANIFEST.txt
+
+# Local fixtures / benchmarks (regenerated)
+/tests/
+/tmp/
+/bench_outputs/
+bench_*.json
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

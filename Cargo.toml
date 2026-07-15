@@ -1,0 +1,49 @@
+[package]
+name = "ctc-forced-aligner-rs"
+version = "0.1.0"
+edition = "2021"
+description = "CTC forced aligner in Rust — Wav2Vec2/MMS emissions via hand-written CUDA / CPU engines. Golden: original Python ctc_forced_aligner."
+license = "MIT"
+readme = "README.md"
+
+[[bin]]
+name = "ctc-aligner"
+path = "src/main.rs"
+
+[features]
+# Both engines compile in by default so a single binary can pick either at
+# runtime via DeviceRequest. Downstream crates can opt out to shrink the binary.
+default = ["cuda", "cpu"]
+
+# CUDA engine: cudarc-driven cuBLAS + hand-written kernels (NVRTC / prebuilt PTX).
+# No DL framework on the hot path.
+cuda = ["dep:cudarc"]
+
+# CPU engine: gemm for matmul + rayon for elementwise / reductions. f32 compute.
+cpu = ["dep:gemm", "dep:rayon"]
+
+[dependencies]
+anyhow = "1"
+bytes = "1.11"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+half = "2"
+hound = "3"
+log = "0.4"
+memmap2 = "0.9"
+regex = "1"
+safetensors = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+unicode-normalization = "0.1"
+
+cudarc = { version = "0.19.7", features = ["cublas", "f16", "nvrtc", "cuda-12080"], optional = true }
+gemm = { version = "0.18", optional = true }
+rayon = { version = "1", optional = true }
+
+# Optional romanization (Python uses uroman). Feature-gated so bare builds stay light.
+uroman = { version = "0.4", default-features = false, optional = true }
+
+[dev-dependencies]
+approx = "0.5"
