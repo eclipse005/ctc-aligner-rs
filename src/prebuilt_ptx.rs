@@ -62,6 +62,27 @@ pub fn resolve_ptx_for_device(major: i32, minor: i32) -> Result<(&'static str, u
 mod tests {
     use super::*;
 
+    /// Kernel entry points loaded by `CudaKernels::load_all` (f32 path).
+    /// Keep in sync with `cudarc_engine.rs`. After editing `kernels.cu`, re-run
+    /// `scripts/compile-ptx.ps1` so every name below is present in `ptx/`.
+    const REQUIRED_F32_KERNELS: &[&str] = &[
+        "layer_norm_f32",
+        "gelu_inplace_f32",
+        "add_inplace_f32",
+        "add_bias_inplace_f32",
+        "bias_residual_f32",
+        "softmax_inplace_last_dim_f32",
+        "merge_heads_f32",
+        "split_qkv_to_heads_f32",
+        "im2col_1d_f32",
+        "im2col_1d_ch_f32",
+        "pad_time_f32",
+        "add_bias_gelu_inplace_f32",
+        "scatter_group_bias_gelu_f32",
+        "split_qkv_to_heads_batched_f32",
+        "merge_heads_batched_f32",
+    ];
+
     #[test]
     fn selects_exact_and_floor() {
         assert_eq!(select_prebuilt_sm(61), Some(61));
@@ -85,6 +106,22 @@ mod tests {
                 "PTX sm_{sm} invalid (len={})",
                 ptx.len()
             );
+        }
+    }
+
+    /// Guards the v1.3.0 regression: kernels.cu advanced past stale prebuilt PTX,
+    /// so `CudaKernels::load_all` failed at runtime with a useless outer message.
+    #[test]
+    fn prebuilt_ptx_contains_all_loaded_f32_kernels() {
+        for &sm in PREBUILT_SMS {
+            let ptx = ptx_for_sm(sm).expect("missing PTX");
+            for &name in REQUIRED_F32_KERNELS {
+                let entry = format!(".visible .entry {name}(");
+                assert!(
+                    ptx.contains(&entry),
+                    "PTX sm_{sm} missing kernel {name}; re-run scripts/compile-ptx.ps1"
+                );
+            }
         }
     }
 }

@@ -38,7 +38,8 @@ impl DeviceRequest {
             #[cfg(feature = "cuda")]
             DeviceRequest::Cuda(ordinal) => {
                 let state = crate::cudarc_engine::CudaState::new(ordinal).map_err(|e| {
-                    anyhow::anyhow!("CUDA init failed (device {ordinal}): {e}")
+                    // Keep the full cause chain (`load kernel foo`, PTX errors, …).
+                    anyhow::anyhow!("CUDA init failed (device {ordinal}): {e:#}")
                 })?;
                 Ok(ResolvedBackend::Cuda(Arc::new(state)))
             }
