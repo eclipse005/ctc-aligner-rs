@@ -191,12 +191,20 @@ RTFx（P104-100 sm_61，load-once，约）：Rust CUDA f32 **~46×**（3m）/ **
 
 ---
 
+## 致谢 / 原版出处
+
+本仓库是 **独立的 Rust 推理实现**，对标 Python [ctc-forced-aligner](https://github.com/MahmoudAshraf97/ctc-forced-aligner) 的对齐流程，并加载社区发布的 MMS forced-aligner 权重；**不是** Meta / 原作者官方发行版，与各方无隶属关系。
+
+| 组件 | 原版 | 链接 | 协议（以官方页面为准） |
+|------|------|------|------------------------|
+| Python 对齐流程 / 工具 | ctc-forced-aligner | [MahmoudAshraf97/ctc-forced-aligner](https://github.com/MahmoudAshraf97/ctc-forced-aligner) | 见上游仓库 |
+| 模型权重 | mms-300m-1130-forced-aligner | [MahmoudAshraf/mms-300m-1130-forced-aligner](https://huggingface.co/MahmoudAshraf/mms-300m-1130-forced-aligner) | 见模型卡 `license` 字段 |
+| 底座模型族 | Meta MMS（Massively Multilingual Speech） | [fairseq examples/mms](https://github.com/facebookresearch/fairseq/tree/main/examples/mms) · [facebook/mms-300m](https://huggingface.co/facebook/mms-300m) | 见 Meta / 模型卡（部分 MMS 权重含 **CC-BY-NC** 等限制，请自行核对） |
+
+使用模型权重时请严格遵守对应许可证（含是否允许商用/再分发）；本仓库的 Rust 推理代码以本仓库 License 为准。
+
+工程实现上亦参考了同系列引擎布局：[qwen-aligner-rs](https://github.com/eclipse005/qwen-aligner-rs)、[cohere-transcribe-rs](https://github.com/eclipse005/cohere-transcribe-rs)。
+
 ## License
 
 MIT
-
-## 致谢
-
-- [ctc-forced-aligner](https://github.com/MahmoudAshraf97/ctc-forced-aligner)
-- [MMS](https://github.com/facebookresearch/fairseq/tree/main/examples/mms)
-- 架构参考：[qwen-aligner-rs](https://github.com/eclipse005/qwen-aligner-rs)、[cohere-transcribe-rs](https://github.com/eclipse005/cohere-transcribe-rs)
