@@ -68,7 +68,10 @@ pub struct ForcedAlignItem {
 #[derive(Debug, Clone)]
 pub struct ForcedAlignResult {
     pub items: Vec<ForcedAlignItem>,
-    /// Frame stride in milliseconds (Python `math.ceil(stride)`).
+    /// Exact frame stride in milliseconds (`waveform_len / t / 16`).
+    /// Python upstream ceils this (~21 ms for a nominal 20 ms model); we keep
+    /// it exact — the ceil inflates all timestamps ~5% and makes a chunk's
+    /// last word overshoot its window (cross-chunk cue overlap downstream).
     pub stride_ms: f32,
     pub backend: String,
 }
@@ -305,8 +308,16 @@ impl Aligner {
             // emissions[dst + c] already 0
         }
 
-        let stride = waveform.len() as f32 * 1000.0 / t as f32 / SAMPLE_RATE as f32;
-        let stride_ms = stride.ceil();
+        // Python upstream does `math.ceil(stride)` (alignment_utils.py:165).
+        // We deliberately do NOT: the true frame stride is ~20.013 ms for the
+        // MMS conv stack, and ceiling it to 21 ms inflates every timestamp by
+        // ~5% (a 30 s window's last word lands at ~31.5 s). Besides drifting
+        // all times, the inflated tail of a chunked alignment overshoots the
+        // chunk window and overlaps the next chunk's first word (observed as
+        // overlapping SRT cues at every chunk seam in voxtrans). Keeping the
+        // exact stride is both more accurate and provably bounded by the
+        // waveform duration: max end = (t-1) * stride / 1000 < len/rate.
+        let stride_ms = waveform.len() as f32 * 1000.0 / t as f32 / SAMPLE_RATE as f32;
         Ok((emissions, t, c_em, stride_ms))
     }
 
